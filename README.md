@@ -110,6 +110,17 @@ Generate a visual dashboard of vulnerability findings:
 ./aws-inspector-dashboard.py --bucket [YOUR_RESULTS_BUCKET]
 ```
 
+## SBOM Analysis and Visualization
+
+This project includes advanced SBOM analysis and visualization capabilities:
+
+1. **Automated Analysis**: The CI/CD pipeline automatically analyzes vulnerability findings
+2. **Interactive Visualizations**: Generate charts and graphs to understand vulnerability patterns
+3. **Comprehensive Reports**: HTML, Markdown, and CSV reports for different audiences
+4. **Actionable Insights**: Prioritized recommendations for vulnerability remediation
+
+For more details, see [SBOM Analysis Documentation](README-ANALYSIS.md).
+
 ## About CycloneDX
 
 CycloneDX is a lightweight SBOM standard designed for use in application security contexts and supply chain component analysis. It's maintained by the OWASP Foundation.
