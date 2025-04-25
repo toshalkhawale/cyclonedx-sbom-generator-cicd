@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for CycloneDX SBOM Generator CI/CD Pipeline'
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: GitHub repository owner
+    Default: your-github-username
+  
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name
+    Default: cyclonedx-sbom-generator
+  
+  GitHubBranch:
+    Type: String
+    Description: GitHub repository branch
+    Default: main
+  
+  GitHubToken:
+    Type: String
+    Description: GitHub OAuth token
+    NoEcho: true
+  
+  SBOMBucketName:
+    Type: String
+    Description: S3 bucket name for storing SBOMs
+    Default: sbom-storage-bucket
+
+Resources:
+  # S3 Buckets
+  SBOMStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref SBOMBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  
+  SBOMReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${SBOMBucketName}-reports"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  
+  # IAM Roles
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipeline_FullAccess
+        - arn:aws:iam::aws:policy/AmazonInspector2FullAccess
+  
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipeline_FullAccess
+        - arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess
+  
+  # CodeBuild Projects
+  SBOMGeneratorBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: SBOMGeneratorBuild
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: S3_BUCKET
+            Value: !Ref SBOMStorageBucket
+          - Name: REPORTS_BUCKET
+            Value: !Ref SBOMReportsBucket
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 14
+              commands:
+                - npm install -g @cyclonedx/cyclonedx-npm
+                - curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+            build:
+              commands:
+                - echo "Generating SBOM..."
+                - mkdir -p sbom-output
+                - cyclonedx-npm --output-format json --output-file sbom-output/nodejs-sbom.json
+                - echo "Uploading SBOM to S3..."
+                - aws s3 cp sbom-output/nodejs-sbom.json s3://$S3_BUCKET/sboms/nodejs-sbom-$(date +%Y%m%d-%H%M%S).json
+                - echo "Creating AWS Inspector SBOM scan..."
+                - |
+                  SBOM_URL="s3://$S3_BUCKET/sboms/nodejs-sbom-$(date +%Y%m%d-%H%M%S).json"
+                  cat > sbom-scan-request.json << EOF
+                  {
+                    "name": "sbom-scan-$(date +%Y%m%d-%H%M%S)",
+                    "sbomFormat": "CYCLONEDX_1_4",
+                    "sbomUrl": "$SBOM_URL"
+                  }
+                  EOF
+                - SCAN_ID=$(aws inspector2 create-sbom-scan --cli-input-json file://sbom-scan-request.json --query 'sbomScanId' --output text)
+                - echo "SBOM scan created with ID: $SCAN_ID"
+                - echo "Waiting for scan to complete..."
+                - |
+                  STATUS="IN_PROGRESS"
+                  MAX_ATTEMPTS=30
+                  ATTEMPT=1
+                  while [ "$STATUS" = "IN_PROGRESS" ] && [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+                    echo "Checking scan status (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
+                    STATUS=$(aws inspector2 get-sbom-scan --sbom-scan-id "$SCAN_ID" --query 'status' --output text)
+                    if [ "$STATUS" = "IN_PROGRESS" ]; then
+                      echo "Scan still in progress. Waiting 10 seconds..."
+                      sleep 10
+                      ATTEMPT=$((ATTEMPT + 1))
+                    else
+                      echo "Scan completed with status: $STATUS"
+                    fi
+                  done
+                - |
+                  if [ "$STATUS" = "SUCCEEDED" ]; then
+                    echo "Retrieving scan results..."
+                    aws inspector2 get-sbom-scan --sbom-scan-id "$SCAN_ID" > scan-results.json
+                    aws inspector2 list-findings --filter-criteria '{"sbomScanArn":{"comparison":"EQUALS","value":"'"$SCAN_ID"'"}}' > findings.json
+                    aws s3 cp scan-results.json s3://$REPORTS_BUCKET/scan-results-$(date +%Y%m%d-%H%M%S).json
+                    aws s3 cp findings.json s3://$REPORTS_BUCKET/findings-$(date +%Y%m%d-%H%M%S).json
+                    echo "Scan results saved to S3"
+                  else
+                    echo "Scan failed or timed out"
+                    exit 1
+                  fi
+          artifacts:
+            files:
+              - sbom-output/**/*
+              - scan-results.json
+              - findings.json
+  
+  # CodePipeline
+  SBOMGeneratorPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: SBOMGeneratorPipeline
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref SBOMStorageBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+              OutputArtifacts:
+                - Name: SourceCode
+        - Name: Build
+          Actions:
+            - Name: GenerateSBOM
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref SBOMGeneratorBuild
+              InputArtifacts:
+                - Name: SourceCode
+              OutputArtifacts:
+                - Name: BuildOutput
+  
+  # EventBridge Rule for Daily Scans
+  DailyScanRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Trigger daily SBOM generation and scanning"
+      ScheduleExpression: "cron(0 0 * * ? *)" # Run daily at midnight UTC
+      State: ENABLED
+      Targets:
+        - Arn: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${SBOMGeneratorPipeline}"
+          Id: "SBOMGeneratorPipelineTarget"
+          RoleArn: !GetAtt EventBridgeServiceRole.Arn
+  
+  EventBridgeServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipeline_FullAccess
+
+Outputs:
+  SBOMStorageBucket:
+    Description: "S3 bucket for storing SBOMs"
+    Value: !Ref SBOMStorageBucket
+  
+  SBOMReportsBucket:
+    Description: "S3 bucket for storing SBOM scan reports"
+    Value: !Ref SBOMReportsBucket
+  
+  CodePipeline:
+    Description: "CodePipeline for SBOM generation and scanning"
+    Value: !Ref SBOMGeneratorPipeline

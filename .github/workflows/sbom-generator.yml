@@ -1,0 +1,120 @@
+name: SBOM Generator CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * *'  # Run daily at midnight UTC
+
+jobs:
+  generate-sbom:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+      
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '14'
+        
+    - name: Install dependencies
+      run: |
+        npm install
+        npm install -g @cyclonedx/cyclonedx-npm
+        
+    - name: Generate SBOM
+      run: |
+        mkdir -p sbom-output
+        cyclonedx-npm --output-format json --output-file sbom-output/nodejs-sbom.json
+        cyclonedx-npm --output-format xml --output-file sbom-output/nodejs-sbom.xml
+        
+    - name: Upload SBOM as artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: sbom-files
+        path: sbom-output/
+        
+    - name: Set up AWS CLI
+      uses: aws-actions/configure-aws-credentials@v1
+      if: github.event_name != 'pull_request'
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+        
+    - name: Upload SBOM to S3
+      if: github.event_name != 'pull_request'
+      run: |
+        aws s3 cp sbom-output/nodejs-sbom.json s3://${{ secrets.SBOM_BUCKET }}/sboms/nodejs-sbom-$(date +%Y%m%d-%H%M%S).json
+        
+    - name: Create AWS Inspector SBOM scan
+      if: github.event_name != 'pull_request'
+      run: |
+        SBOM_URL="s3://${{ secrets.SBOM_BUCKET }}/sboms/nodejs-sbom-$(date +%Y%m%d-%H%M%S).json"
+        cat > sbom-scan-request.json << EOF
+        {
+          "name": "sbom-scan-$(date +%Y%m%d-%H%M%S)",
+          "sbomFormat": "CYCLONEDX_1_4",
+          "sbomUrl": "$SBOM_URL"
+        }
+        EOF
+        SCAN_ID=$(aws inspector2 create-sbom-scan --cli-input-json file://sbom-scan-request.json --query 'sbomScanId' --output text)
+        echo "SBOM scan created with ID: $SCAN_ID"
+        echo "SCAN_ID=$SCAN_ID" >> $GITHUB_ENV
+        
+    - name: Wait for scan to complete
+      if: github.event_name != 'pull_request'
+      run: |
+        STATUS="IN_PROGRESS"
+        MAX_ATTEMPTS=30
+        ATTEMPT=1
+        while [ "$STATUS" = "IN_PROGRESS" ] && [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+          echo "Checking scan status (attempt $ATTEMPT/$MAX_ATTEMPTS)..."
+          STATUS=$(aws inspector2 get-sbom-scan --sbom-scan-id "$SCAN_ID" --query 'status' --output text)
+          if [ "$STATUS" = "IN_PROGRESS" ]; then
+            echo "Scan still in progress. Waiting 10 seconds..."
+            sleep 10
+            ATTEMPT=$((ATTEMPT + 1))
+          else
+            echo "Scan completed with status: $STATUS"
+          fi
+        done
+        
+    - name: Process scan results
+      if: github.event_name != 'pull_request'
+      run: |
+        if [ "$STATUS" = "SUCCEEDED" ]; then
+          echo "Retrieving scan results..."
+          aws inspector2 get-sbom-scan --sbom-scan-id "$SCAN_ID" > scan-results.json
+          aws inspector2 list-findings --filter-criteria '{"sbomScanArn":{"comparison":"EQUALS","value":"'"$SCAN_ID"'"}}' > findings.json
+          
+          # Upload results to S3
+          aws s3 cp scan-results.json s3://${{ secrets.REPORTS_BUCKET }}/scan-results-$(date +%Y%m%d-%H%M%S).json
+          aws s3 cp findings.json s3://${{ secrets.REPORTS_BUCKET }}/findings-$(date +%Y%m%d-%H%M%S).json
+          
+          # Generate summary
+          CRITICAL_COUNT=$(grep -o '"CRITICAL"' findings.json | wc -l)
+          HIGH_COUNT=$(grep -o '"HIGH"' findings.json | wc -l)
+          MEDIUM_COUNT=$(grep -o '"MEDIUM"' findings.json | wc -l)
+          LOW_COUNT=$(grep -o '"LOW"' findings.json | wc -l)
+          
+          echo "Vulnerability Summary:"
+          echo "CRITICAL: $CRITICAL_COUNT"
+          echo "HIGH: $HIGH_COUNT"
+          echo "MEDIUM: $MEDIUM_COUNT"
+          echo "LOW: $LOW_COUNT"
+          echo "TOTAL: $(($CRITICAL_COUNT + $HIGH_COUNT + $MEDIUM_COUNT + $LOW_COUNT))"
+          
+          # Fail the build if critical vulnerabilities are found
+          if [ $CRITICAL_COUNT -gt 0 ]; then
+            echo "Critical vulnerabilities found! Please review the findings."
+            exit 1
+          fi
+        else
+          echo "Scan failed or timed out"
+          exit 1
+        fi
