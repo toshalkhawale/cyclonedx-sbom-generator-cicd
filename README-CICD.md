@@ -23,7 +23,7 @@ The CloudFormation template creates all necessary AWS resources:
 - S3 buckets for SBOM storage and reports
 - CodeBuild project for SBOM generation and scanning
 - CodePipeline for orchestration
-- IAM roles with required permissions
+- IAM roles with required permissions (including CloudWatch Logs permissions)
 - EventBridge rule for scheduled scans
 
 To deploy using CloudFormation:
@@ -63,6 +63,10 @@ For direct integration with AWS CodeBuild:
 3. Set the following environment variables:
    - `S3_BUCKET`: S3 bucket for storing SBOMs
    - `REPORTS_BUCKET`: S3 bucket for storing reports
+4. Ensure the CodeBuild service role has the following permissions:
+   - S3 access for storing SBOMs and reports
+   - AWS Inspector permissions for scanning
+   - CloudWatch Logs permissions for logging build output
 
 ## Pipeline Workflow
 
@@ -103,7 +107,25 @@ Monitor your pipeline:
 
 Common issues:
 
-1. **Permission errors**: Ensure IAM roles have necessary permissions
-2. **Scan failures**: Check AWS Inspector service status
-3. **GitHub integration issues**: Verify OAuth token has correct permissions
-4. **Build failures**: Review CodeBuild logs for detailed error messages
+1. **Permission errors**: 
+   - Ensure IAM roles have necessary permissions
+   - Check that CloudWatch Logs permissions are properly configured
+   - Verify S3 bucket policies allow access
+
+2. **YAML parsing errors**:
+   - Ensure buildspec.yml follows proper YAML syntax
+   - Avoid using pipe (`|`) characters in complex multi-line commands
+   - Break complex shell scripts into individual command lines
+
+3. **Scan failures**: 
+   - Check AWS Inspector service status
+   - Verify SBOM format is valid
+   - Ensure S3 bucket permissions allow Inspector to access SBOMs
+
+4. **GitHub integration issues**: 
+   - Verify OAuth token has correct permissions
+   - Check webhook configuration
+
+5. **Build failures**: 
+   - Review CodeBuild logs for detailed error messages
+   - Check environment variables are properly set

@@ -17,9 +17,12 @@ cyclonedx-sbom-generator/
 ├── aws-inspector-cloudformation.yaml     # CloudFormation template for AWS Inspector integration
 ├── aws-inspector-cloudformation-deploy.sh # Script to deploy CloudFormation stack
 ├── aws-inspector-cloudformation-README.md # Documentation for CloudFormation deployment
+├── buildspec.yml                         # AWS CodeBuild specification file
+├── cloudformation/                       # CloudFormation templates for CI/CD
 ├── Dockerfile                            # Container definition
 ├── docker-compose.yml                    # Multi-service setup
 ├── ci-cd-integration.md                  # CI/CD integration examples
+├── README-CICD.md                        # CI/CD pipeline documentation
 └── sbom-output/                          # Generated SBOM files (created by the script)
 ```
 
@@ -30,6 +33,7 @@ cyclonedx-sbom-generator/
 - For Python projects: Python and pip
 - For Java projects: Maven
 - For AWS integration: AWS CLI configured with appropriate permissions
+- For CI/CD pipeline: GitHub account and AWS CodeBuild/CodePipeline access
 
 ## Getting Started
 
@@ -83,6 +87,22 @@ This deploys:
 
 For more details, see [AWS Inspector CloudFormation README](aws-inspector-cloudformation-README.md).
 
+### Option 3: CI/CD Pipeline Integration
+
+For continuous integration and delivery:
+```
+./deploy-pipeline.sh
+```
+
+This sets up:
+- CodePipeline for orchestration
+- CodeBuild for SBOM generation and scanning
+- S3 buckets for artifact storage
+- IAM roles with proper permissions
+- Scheduled daily scans
+
+For more details, see [CI/CD Pipeline Documentation](README-CICD.md).
+
 ### Dashboard Generation
 
 Generate a visual dashboard of vulnerability findings:
@@ -107,8 +127,37 @@ The SBOM generator script supports:
 
 The script generates SBOMs in both JSON and XML formats, which are placed in the `sbom-output` directory.
 
+## CI/CD Integration
+
+This project includes CI/CD pipeline integration for automated SBOM generation and vulnerability scanning. The pipeline:
+
+1. Automatically generates SBOMs for your application
+2. Uploads SBOMs to S3 for storage and tracking
+3. Scans SBOMs using AWS Inspector for vulnerabilities
+4. Reports findings and fails builds if critical vulnerabilities are found
+
+For more details, see [CI/CD Integration Documentation](README-CICD.md).
+
+## Best Practices
+
+- Generate SBOMs as part of your build process
+- Store SBOMs in a secure location for reference
+- Scan SBOMs regularly for new vulnerabilities
+- Include SBOM generation in your CI/CD pipeline
+- Review and address vulnerabilities promptly
+
 ## Additional Resources
 
 - [CycloneDX Specification](https://cyclonedx.org/specification/overview/)
 - [OWASP CycloneDX Project](https://owasp.org/www-project-cyclonedx/)
 - [AWS Inspector Documentation](https://docs.aws.amazon.com/inspector/latest/user/scanning-sbom.html)
+- [NTIA SBOM Minimum Elements](https://www.ntia.gov/files/ntia/publications/sbom_minimum_elements_report.pdf)
+
+## Troubleshooting
+
+Common issues:
+
+1. **Permission errors**: Ensure AWS CLI is configured with appropriate permissions
+2. **Scan failures**: Check AWS Inspector service status and SBOM format
+3. **CI/CD pipeline errors**: Review CloudWatch Logs for detailed error messages
+4. **YAML parsing errors**: Ensure buildspec.yml follows proper YAML syntax

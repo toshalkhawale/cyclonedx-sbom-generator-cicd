@@ -77,3 +77,8 @@ echo
 echo "Your CI/CD pipeline is now set up and will automatically generate SBOMs and scan for vulnerabilities."
 echo "The pipeline will run automatically when you push to your GitHub repository."
 echo "It will also run daily at midnight UTC."
+echo
+echo "Note: The CodeBuild service role has been configured with the necessary permissions for:"
+echo "  - S3 access (for storing SBOMs and reports)"
+echo "  - AWS Inspector (for vulnerability scanning)"
+echo "  - CloudWatch Logs (for build logging)"
